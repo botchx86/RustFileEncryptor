@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "RustEncryptor"
+version = "1.0.0"
+dependencies = [
+ "aes-gcm",
+ "hex",
+ "rand",
+]
+
+[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,15 +216,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
-]
-
-[[package]]
-name = "rust-file-encryptor"
-version = "1.0.0"
-dependencies = [
- "aes-gcm",
- "hex",
- "rand",
 ]
 
 [[package]]
