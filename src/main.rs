@@ -98,6 +98,20 @@ fn encrypt_file(input_path: &str, output_path: &str, force: bool) -> std::io::Re
         (file_size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64
     };
 
+    // SEC-001/SEC-003: hard cap at u32::MAX chunks to guarantee nonce uniqueness.
+    // The nonce is [8-byte prefix || 4-byte chunk index], so the counter saturates
+    // at 2^32 - 1 chunks (≈ 256 TiB with 64 KiB chunks).
+    if chunk_count > u32::MAX as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "File too large: {} chunks exceeds the 2^32 chunk limit (~256 TiB). \
+                 Encrypting beyond this limit would reuse AES-GCM nonces.",
+                chunk_count
+            ),
+        ));
+    }
+
     let mut input = BufReader::new(File::open(input_path)?);
     let mut output = BufWriter::new(File::create(output_path)?);
 
@@ -107,7 +121,11 @@ fn encrypt_file(input_path: &str, output_path: &str, force: bool) -> std::io::Re
 
     let mut buf = vec![0u8; CHUNK_SIZE];
     for i in 0..chunk_count {
-        let nonce_bytes = chunk_nonce(&nonce_prefix, i as u32);
+        // SEC-001: chunk_count <= u32::MAX is enforced above; return Err rather than panic.
+        let idx = u32::try_from(i).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "chunk index overflow")
+        })?;
+        let nonce_bytes = chunk_nonce(&nonce_prefix, idx);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let n = read_chunk(&mut input, &mut buf)?;
         let aad = i.to_le_bytes();
@@ -149,6 +167,38 @@ fn decrypt_file(input_path: &str, output_path: &str, force: bool) -> std::io::Re
     input.read_exact(&mut count_bytes)?;
     let chunk_count = u64::from_le_bytes(count_bytes);
 
+    // SEC-002: validate chunk_count against actual file size before entering the
+    // decryption loop. An attacker can set the header field to u64::MAX, which
+    // without this check causes an infinite read loop.
+    // Tight bound: use CHUNK_SIZE+16 as divisor (exact size of a non-final chunk).
+    let header_size: u64 = (SALT_LEN + NONCE_PREFIX_LEN + 8) as u64;
+    {
+        let file_size = std::fs::metadata(input_path)?.len();
+        let data_bytes = file_size.saturating_sub(header_size);
+        let max_plausible: u64 = if data_bytes == 0 {
+            0
+        } else {
+            data_bytes / (CHUNK_SIZE as u64 + 16) + 1
+        };
+        if chunk_count > max_plausible {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Corrupt or malicious file: declared {} chunks but file data \
+                     can contain at most {} chunks",
+                    chunk_count, max_plausible
+                ),
+            ));
+        }
+    }
+    // SEC-001 (decrypt path): enforce nonce-space cap.
+    if chunk_count > u32::MAX as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "File chunk count exceeds nonce space (must be <= 2^32)".to_string(),
+        ));
+    }
+
     let password = prompt_password(false);
     let key = derive_key(&password, &salt);
     let cipher =
@@ -158,7 +208,11 @@ fn decrypt_file(input_path: &str, output_path: &str, force: bool) -> std::io::Re
     let mut buf = vec![0u8; CHUNK_SIZE + 16];
 
     for i in 0..chunk_count {
-        let nonce_bytes = chunk_nonce(&nonce_prefix, i as u32);
+        // SEC-001: chunk_count <= u32::MAX enforced above; return Err rather than panic.
+        let idx = u32::try_from(i).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "chunk index overflow")
+        })?;
+        let nonce_bytes = chunk_nonce(&nonce_prefix, idx);
         let nonce = Nonce::from_slice(&nonce_bytes);
         let aad = i.to_le_bytes();
 
